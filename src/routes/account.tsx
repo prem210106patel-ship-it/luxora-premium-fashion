@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Package,
   MapPin,
@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Plus,
   Trash2,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/lux/Button";
 import { EmptyState } from "@/components/lux/States";
@@ -17,6 +18,8 @@ import { useStore, type Address } from "@/store/store";
 import { useToast } from "@/components/lux/Toast";
 import { formatPrice, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { getMyOrders, type OrderWithItems } from "@/services/orders";
+import { getProduct } from "@/data/products";
 
 export const Route = createFileRoute("/account")({
   component: AccountPage,
@@ -30,6 +33,8 @@ function AccountPage() {
   const toast = useToast();
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("profile");
+  const [supabaseOrders, setSupabaseOrders] = useState<OrderWithItems[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
   const [addrModal, setAddrModal] = useState(false);
   const [addrForm, setAddrForm] = useState({
     label: "",
@@ -39,6 +44,24 @@ function AccountPage() {
     pincode: "",
     phone: "",
   });
+
+  useEffect(() => {
+    if (!user?.email) return;
+    let cancelled = false;
+    setOrdersLoading(true);
+    (async () => {
+      try {
+        const result = await getMyOrders(user.email);
+        if (!cancelled) {
+          setSupabaseOrders(result);
+          setOrdersLoading(false);
+        }
+      } catch {
+        if (!cancelled) setOrdersLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.email]);
 
   if (!hydrated) {
     return (
@@ -176,7 +199,12 @@ function AccountPage() {
           {tab === "orders" && (
             <div>
               <h2 className="mb-5 font-display text-xl">My Orders</h2>
-              {orders.length === 0 ? (
+              {ordersLoading ? (
+                <div className="flex items-center justify-center py-16 text-muted">
+                  <Loader2 size={20} className="animate-spin" />
+                  <span className="ml-2 text-[13px]">Loading your orders…</span>
+                </div>
+              ) : supabaseOrders.length === 0 && orders.length === 0 ? (
                 <EmptyState
                   icon={<Package size={22} />}
                   title="No orders yet"
@@ -191,8 +219,56 @@ function AccountPage() {
                 />
               ) : (
                 <div className="space-y-4">
-                  {orders.map((order) => (
-                    <div key={order.id} className="rounded-lg border border-border bg-surface p-5">
+                  {/* Supabase orders (primary source) */}
+                  {supabaseOrders.map((sOrder) => (
+                    <div key={sOrder.id} className="rounded-lg border border-border bg-surface p-5">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[14px] font-medium">
+                            Order #{sOrder.id.length > 12 ? sOrder.id.slice(0, 8) + "…" : sOrder.id}
+                          </p>
+                          <p className="text-[12px] text-muted">
+                            {formatDate(sOrder.created_at)} · {sOrder.status}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-[15px] font-medium">{formatPrice(Number(sOrder.total_amount))}</p>
+                          <p className="text-[11px] text-muted">{sOrder.payment_method}</p>
+                        </div>
+                      </div>
+                      <div className="mt-4 flex gap-3">
+                        {sOrder.order_items.slice(0, 4).map((item) => {
+                          const product = getProduct(item.product_id);
+                          return product ? (
+                            <img
+                              key={`${item.product_id}-${item.size}-${item.color}`}
+                              src={product.images[0]}
+                              alt={item.product_name}
+                              className="h-14 w-12 rounded-md object-cover"
+                            />
+                          ) : null;
+                        })}
+                        {sOrder.order_items.length > 4 && (
+                          <div className="grid h-14 w-12 place-items-center rounded-md bg-stone text-[11px] text-muted">
+                            +{sOrder.order_items.length - 4}
+                          </div>
+                        )}
+                      </div>
+                      <Link
+                        to="/order-success"
+                        search={{ id: sOrder.id }}
+                        className="mt-4 inline-flex items-center gap-1 text-[13px] text-muted hover:text-foreground"
+                      >
+                        View details
+                        <ChevronRight size={14} />
+                      </Link>
+                    </div>
+                  ))}
+                  {/* Legacy localStorage orders (not in Supabase) */}
+                  {orders
+                    .filter((o) => !supabaseOrders.some((s) => s.id === o.id))
+                    .map((order) => (
+                    <div key={order.id} className="rounded-lg border border-border bg-surface p-5 opacity-70">
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-[14px] font-medium">Order #{order.id}</p>
@@ -211,11 +287,6 @@ function AccountPage() {
                             className="h-14 w-12 rounded-md object-cover"
                           />
                         ))}
-                        {order.items.length > 4 && (
-                          <div className="grid h-14 w-12 place-items-center rounded-md bg-stone text-[11px] text-muted">
-                            +{order.items.length - 4}
-                          </div>
-                        )}
                       </div>
                       <Link
                         to="/order-success"

@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { ChevronRight, CreditCard, Truck, Wallet, Banknote } from "lucide-react";
+import { ChevronRight, CreditCard, Truck, Wallet, Banknote, QrCode, CheckCircle2, Info } from "lucide-react";
 import { getProduct, coupons } from "@/data/products";
 import { Button } from "@/components/lux/Button";
 import { EmptyState } from "@/components/lux/States";
@@ -8,6 +8,7 @@ import { useStore, type Order, type Address } from "@/store/store";
 import { useToast } from "@/components/lux/Toast";
 import { formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { createOrder, generateDemoTransactionId } from "@/services/orders";
 
 export const Route = createFileRoute("/checkout")({
   component: CheckoutPage,
@@ -20,13 +21,23 @@ const DELIVERY_METHODS = [
 ];
 
 const PAYMENT_METHODS = [
+  { id: "demo", label: "Demo Payment", icon: QrCode, badge: "TEST" },
   { id: "card", label: "Credit / Debit Card", icon: CreditCard },
   { id: "upi", label: "UPI", icon: Wallet },
   { id: "cod", label: "Cash on Delivery", icon: Banknote },
 ];
 
+function DemoQrPlaceholder() {
+  return (
+    <div className="mx-auto flex size-44 flex-col items-center justify-center rounded-lg border-2 border-dashed border-foreground/20 bg-stone/50">
+      <QrCode size={64} className="text-foreground/30" />
+      <span className="mt-2 text-[10px] uppercase tracking-[0.15em] text-muted">Demo QR</span>
+    </div>
+  );
+}
+
 function CheckoutPage() {
-  const { cart, subtotal, hydrated, placeOrder, clearCart, user, addresses } = useStore();
+  const { cart, subtotal, hydrated, placeOrder, clearCart, user } = useStore();
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -41,10 +52,11 @@ function CheckoutPage() {
     pincode: "",
   });
   const [deliveryMethod, setDeliveryMethod] = useState("standard");
-  const [paymentMethod, setPaymentMethod] = useState("card");
+  const [paymentMethod, setPaymentMethod] = useState("demo");
   const [couponCode] = useState("LUXORA10");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [placing, setPlacing] = useState(false);
+  const [demoPaid, setDemoPaid] = useState(false);
 
   const coupon = coupons[couponCode] ?? null;
   const discount = coupon
@@ -83,16 +95,28 @@ function CheckoutPage() {
     return Object.keys(errs).length === 0;
   };
 
-  const handlePlaceOrder = (e: React.FormEvent) => {
+  const handleDemoPaid = () => {
+    setDemoPaid(true);
+    toast("Demo payment confirmed — no real money was transferred", "success");
+  };
+
+  const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validate()) {
       toast("Please fill in all required fields", "error");
       return;
     }
+
+    if (paymentMethod === "demo" && !demoPaid) {
+      toast("Please click 'I Have Paid' to simulate the demo payment", "error");
+      return;
+    }
+
     setPlacing(true);
 
-    setTimeout(() => {
-      const orderId = `LX-${Date.now().toString().slice(-8)}`;
+    try {
+      const customerName = `${form.firstName} ${form.lastName}`.trim();
+      const transactionId = paymentMethod === "demo" ? generateDemoTransactionId() : "";
       const address: Address = {
         id: `addr-${Date.now()}`,
         label: "Shipping",
@@ -105,31 +129,88 @@ function CheckoutPage() {
       const estimatedDelivery = new Date();
       estimatedDelivery.setDate(estimatedDelivery.getDate() + (deliveryMethod === "express" ? 2 : 5));
 
-      const order: Order = {
-        id: orderId,
-        placedAt: new Date().toISOString(),
-        items: lines.map(({ line, product }) => ({
-          ...line,
-          name: product.name,
-          price: product.price,
-          image: product.images[0],
-        })),
-        subtotal,
-        discount,
-        shipping,
-        total,
-        address,
-        deliveryMethod: DELIVERY_METHODS.find((d) => d.id === deliveryMethod)?.label ?? "Standard",
-        paymentMethod: PAYMENT_METHODS.find((p) => p.id === paymentMethod)?.label ?? "Card",
-        estimatedDelivery: estimatedDelivery.toISOString(),
-        status: "Confirmed",
-      };
+      if (paymentMethod === "demo") {
+        const supabaseOrder = await createOrder({
+          customer_name: customerName,
+          customer_email: form.email,
+          customer_phone: form.phone,
+          total_amount: total,
+          payment_method: "demo",
+          payment_transaction_id: transactionId,
+          shipping_address: {
+            line1: form.address,
+            city: form.city,
+            state: form.state,
+            pincode: form.pincode,
+            phone: form.phone,
+          },
+          items: lines.map(({ line, product }) => ({
+            product_id: product.id,
+            product_name: product.name,
+            quantity: line.quantity,
+            price: product.price,
+            size: line.size,
+            color: line.color,
+          })),
+        });
 
-      placeOrder(order);
-      clearCart();
+        const localOrder: Order = {
+          id: supabaseOrder.id,
+          placedAt: supabaseOrder.created_at,
+          items: lines.map(({ line, product }) => ({
+            ...line,
+            name: product.name,
+            price: product.price,
+            image: product.images[0],
+          })),
+          subtotal,
+          discount,
+          shipping,
+          total,
+          address,
+          deliveryMethod: DELIVERY_METHODS.find((d) => d.id === deliveryMethod)?.label ?? "Standard",
+          paymentMethod: "Demo Payment",
+          estimatedDelivery: estimatedDelivery.toISOString(),
+          status: "pending",
+        };
+
+        placeOrder(localOrder);
+        clearCart();
+        setPlacing(false);
+        navigate({ to: "/order-success", search: { id: supabaseOrder.id } });
+      } else {
+        const orderId = `LX-${Date.now().toString().slice(-8)}`;
+        const order: Order = {
+          id: orderId,
+          placedAt: new Date().toISOString(),
+          items: lines.map(({ line, product }) => ({
+            ...line,
+            name: product.name,
+            price: product.price,
+            image: product.images[0],
+          })),
+          subtotal,
+          discount,
+          shipping,
+          total,
+          address,
+          deliveryMethod: DELIVERY_METHODS.find((d) => d.id === deliveryMethod)?.label ?? "Standard",
+          paymentMethod: PAYMENT_METHODS.find((p) => p.id === paymentMethod)?.label ?? "Card",
+          estimatedDelivery: estimatedDelivery.toISOString(),
+          status: "Confirmed",
+        };
+
+        placeOrder(order);
+        clearCart();
+        setPlacing(false);
+        navigate({ to: "/order-success", search: { id: orderId } });
+      }
+    } catch (err) {
       setPlacing(false);
-      navigate({ to: "/order-success", search: { id: orderId } });
-    }, 1200);
+      setDemoPaid(false);
+      const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
+      toast(message, "error");
+    }
   };
 
   if (!hydrated) {
@@ -316,7 +397,7 @@ function CheckoutPage() {
                 <button
                   key={method.id}
                   type="button"
-                  onClick={() => setPaymentMethod(method.id)}
+                  onClick={() => { setPaymentMethod(method.id); setDemoPaid(false); }}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-md border px-4 py-3 text-left text-[13px] transition-colors",
                     paymentMethod === method.id
@@ -334,9 +415,79 @@ function CheckoutPage() {
                   </span>
                   <method.icon size={16} className="text-muted" />
                   {method.label}
+                  {"badge" in method && method.badge && (
+                    <span className="ml-1 rounded-sm bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
+                      {method.badge}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
+
+            {/* Demo payment section */}
+            {paymentMethod === "demo" && (
+              <div className="mt-5 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
+                <div className="flex items-center gap-2 border-b border-primary/20 pb-3">
+                  <QrCode size={18} className="text-primary" />
+                  <h3 className="font-display text-lg text-primary">Demo Payment</h3>
+                  <span className="ml-auto rounded-sm bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
+                    Test Only
+                  </span>
+                </div>
+
+                <p className="mt-3 flex items-start gap-2 rounded-md bg-background/80 p-3 text-[12px] text-muted">
+                  <Info size={14} className="mt-0.5 shrink-0 text-primary" />
+                  This is a demo payment. No real money will be transferred.
+                </p>
+
+                <div className="mt-5 flex flex-col items-center gap-4 sm:flex-row sm:items-start sm:gap-6">
+                  {/* Dummy QR */}
+                  <div className="shrink-0">
+                    <DemoQrPlaceholder />
+                  </div>
+
+                  {/* Payment details */}
+                  <div className="flex-1 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[12px] uppercase tracking-[0.15em] text-muted">Order Amount</span>
+                      <span className="font-display text-xl">{formatPrice(total)}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[12px] uppercase tracking-[0.15em] text-muted">Demo UPI ID</span>
+                      <span className="rounded-md bg-background px-3 py-1 font-mono text-[13px] text-foreground">
+                        demo@upi
+                      </span>
+                    </div>
+
+                    <Button
+                      type="button"
+                      variant={demoPaid ? "outline" : "solid"}
+                      shape="rounded"
+                      size="md"
+                      block
+                      disabled={demoPaid}
+                      onClick={handleDemoPaid}
+                    >
+                      {demoPaid ? (
+                        <>
+                          <CheckCircle2 size={15} className="text-success" />
+                          Demo Payment Confirmed
+                        </>
+                      ) : (
+                        "I Have Paid"
+                      )}
+                    </Button>
+
+                    {demoPaid && (
+                      <p className="text-center text-[11px] text-success">
+                        Demo payment recorded. Click "Place Order" to complete your purchase.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {paymentMethod === "card" && (
               <div className="mt-4 space-y-3 rounded-md border border-border bg-background p-4">
                 <p className="text-[11px] text-muted">Simulated checkout — no real payment will be processed.</p>
@@ -406,7 +557,9 @@ function CheckoutPage() {
               {placing ? "Placing order…" : "Place Order"}
             </Button>
             <p className="mt-3 text-center text-[11px] text-muted">
-              By placing your order you agree to our terms.
+              {paymentMethod === "demo"
+                ? "Demo payment — no real money will be processed."
+                : "By placing your order you agree to our terms."}
             </p>
           </div>
         </div>
